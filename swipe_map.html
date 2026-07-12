@@ -5,6 +5,17 @@
   <title>1954 AMS Map vs Fields of the World</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
+  <!-- Open Graph tags so LinkedIn (and other platforms) show a static
+       preview card instead of trying to render the live interactive map.
+       LinkedIn caches these per-URL - after publishing, run this page
+       through https://www.linkedin.com/post-inspector/ to force a
+       re-scrape before actually posting. -->
+  <meta property="og:title" content="1954 AMS Topo Map vs Fields of the World" />
+  <meta property="og:description" content="Comparing a 1954 topographic survey against ML-predicted field boundaries." />
+  <meta property="og:image" content="https://untld-net.github.io/geoai-failure-mode/ams_ftw_kanchipuram_preview.png" />
+  <meta property="og:url" content="https://untld-net.github.io/geoai-failure-mode/swipe_map.html" />
+  <meta property="og:type" content="website" />
+
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl/dist/maplibre-gl.css" />
   <script src="https://unpkg.com/maplibre-gl/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/pmtiles@3/dist/pmtiles.js"></script>
