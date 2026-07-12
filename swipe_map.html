@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>1954 AMS Map vs Fields of the World</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl/dist/maplibre-gl.css" />
+  <script src="https://unpkg.com/maplibre-gl/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/pmtiles@3/dist/pmtiles.js"></script>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: sans-serif; background: #111; }
+
+    #container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Both maps fill the full container */
+    #map-right, #map-left {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+    }
+
+    /* Left map clips to the left of the divider */
+    #map-left {
+      clip-path: inset(0 50% 0 0);
+      z-index: 2;
+    }
+
+    /* Divider bar */
+    #divider {
+      position: absolute;
+      top: 0;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 4px;
+      height: 100%;
+      background: white;
+      z-index: 10;
+      cursor: ew-resize;
+    }
+
+    #divider::after {
+      content: '◀ ▶';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: white;
+      color: #333;
+      padding: 6px 10px;
+      border-radius: 20px;
+      font-size: 14px;
+      white-space: nowrap;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+      cursor: ew-resize;
+    }
+
+    /* Labels */
+    .map-label {
+      position: absolute;
+      top: 14px;
+      background: rgba(0,0,0,0.55);
+      color: white;
+      padding: 5px 12px;
+      border-radius: 4px;
+      font-size: 13px;
+      z-index: 5;
+      pointer-events: none;
+    }
+    #label-left  { left:  14px; }
+    #label-right { right: 14px; }
+  </style>
+</head>
+<body>
+<div id="container">
+
+  <!-- RIGHT MAP: FTW predictions on terrain basemap -->
+  <div id="map-right"></div>
+
+  <!-- LEFT MAP: 1954 AMS topo tiles -->
+  <div id="map-left"></div>
+
+  <!-- Labels -->
+  <div class="map-label" id="label-left">AMS U502 · 1954</div>
+  <div class="map-label" id="label-right">Fields of the World · 2024</div>
+
+  <!-- Draggable divider -->
+  <div id="divider"></div>
+</div>
+
+<script>
+  // ── PMTiles protocol ──────────────────────────────────────────────
+  const protocol = new pmtiles.Protocol();
+  maplibregl.addProtocol('pmtiles', protocol.tile.bind(protocol));
+
+  // Demo AOI: Kanchipuram-Tiruvallur box. CENTER is the midpoint of that
+  // box (= midpoint between the two towns, since they sit at opposite
+  // corners of it) - already correct, no change needed there.
+  const CENTER = [79.8333, 13.0];
+  const ZOOM   = 11;
+  const BOUNDS = [[79.6667, 12.8333], [80.0, 13.1667]];
+
+  // z10 = floor, z13 = ceiling. Below z10 neither dataset has meaningful
+  // native detail to show; beyond z13 AMS is past its 1954 400dpi scan
+  // resolution (~15.9m/px at z13) and we're capping FTW at the same
+  // ceiling for consistency, even though FTW's own Sentinel-2-derived
+  // precision would technically support a bit more (~z14). Capping the
+  // map itself (not just the sources) means nobody can zoom past the
+  // point where either layer stops being an honest representation.
+  const sharedOptions = {
+    center: CENTER,
+    zoom:   ZOOM,
+    minZoom: 10,
+    maxZoom: 13,
+    maxBounds: [[78.5, 12.0], [81.5, 14.5]],
+    attributionControl: false
+  };
+
+  // ── AMS PMTiles source (LEFT map only) ─────────────────────────────
+  // ams_kanchipuram_v4.pmtiles file still contains z10-15 tiles, but the
+  // source maxzoom below is capped at 13 (the map's own maxZoom already
+  // enforces this too - this is just belt-and-braces so MapLibre never
+  // bothers requesting the unused z14/z15 tiles). z10-11 have a
+  // deliberate 1-tile symmetric padding ring beyond the Kanchipuram-
+  // Tiruvallur demo box (real, controlled margin - not the accidental
+  // one-sided rounding artifact from an earlier build). Must sit next to
+  // this HTML on whatever host/local server serves this page. Built as
+  // an absolute URL from the page's own location, so it resolves
+  // correctly whether you're testing on localhost or once it's deployed.
+  // Served via a Pages Function at /tiles/* backed by an R2 bucket (see
+  // functions/tiles/[[path]].js) rather than as a plain root-level
+  // static asset - Cloudflare's ordinary static-asset serving corrupts
+  // byte-range responses for files like this (confirmed via console:
+  // "Server returned no content-length header..."), which is what was
+  // silently breaking both layers once deployed. R2 + a Function that
+  // handles Range requests correctly is the documented working fix.
+  const AMS_PMTILES_URL = new URL('ams_kanchipuram_v4.pmtiles', window.location.href).href;
+  const AMS_TILES = 'pmtiles://' + AMS_PMTILES_URL;
+
+  const amsSource = {
+    type: 'raster',
+    url: AMS_TILES,
+    tileSize: 256,
+    minzoom: 10,
+    maxzoom: 13,
+    attribution: 'AMS Series U502 · 1954 · University of Texas Libraries'
+  };
+
+  // FTW vector layers - self-hosted crop (ftw_kanchipuram.pmtiles).
+  // Since FTW's vectorization is a fixed-block process (not zoom-adaptive
+  // simplification), the geometry at every zoom is identical - storing
+  // more than one native zoom level is pure redundancy. This file should
+  // be rebuilt as a SINGLE z10 level (~8MB vs the ~116MB multi-zoom
+  // version); MapLibre's vector overzoom then losslessly covers z10-13
+  // from that one level with no separate tiles needed in between.
+  // Built from data.source.coop's global.pmtiles instead of a live
+  // cross-origin fetch, since that host doesn't send working CORS headers
+  // for browser access (confirmed failing identically in Firefox and
+  // Safari - HTTP 500s and missing Access-Control-Allow-Origin). Same
+  // absolute-URL trick as AMS so it resolves correctly local or hosted.
+  // Layer names are date-scoped, confirmed via pmtiles.io tile inspector:
+  // field-2024-01-01 00:00:00, field-2025-01-01 00:00:00,
+  // field_boundaries-2024-01-01 00:00:00, field_boundaries-2025-01-01 00:00:00
+  const FTW_PMTILES_URL = new URL('ftw_kanchipuram.pmtiles', window.location.href).href;
+  const FTW_URL = 'pmtiles://' + FTW_PMTILES_URL;
+  const FTW_FILL_LAYER = 'field-2024-01-01 00:00:00';
+  const FTW_BOUNDARY_LAYER = 'field_boundaries-2024-01-01 00:00:00';
+
+  // ── TERRAIN BASEMAP STYLE (Stadia Stamen Terrain) ──────────────────
+  // NOTE: works without a key on localhost only. Once hosted (Cloudflare
+  // Pages etc.), set up domain-based auth or an API key in Stadia's
+  // dashboard, or this basemap will stop loading. (Parked for later.)
+  const terrainStyle = {
+    version: 8,
+    sources: {
+      terrain: {
+        type: 'raster',
+        tiles: ['https://tiles.stadiamaps.com/tiles/stamen_terrain/{z}/{x}/{y}.png'],
+        tileSize: 256,
+        attribution: '© Stadia Maps © Stamen Design © OpenStreetMap'
+      }
+    },
+    layers: [{ id: 'terrain', type: 'raster', source: 'terrain' }]
+  };
+
+  // ── RIGHT MAP: terrain basemap + FTW field predictions on top ─────
+  const mapRight = new maplibregl.Map({
+    container: 'map-right',
+    style: terrainStyle,
+    ...sharedOptions
+  });
+
+  mapRight.on('load', () => {
+    mapRight.addSource('ftw', { type: 'vector', url: FTW_URL });
+
+    mapRight.addLayer({
+      id: 'ftw-fill',
+      type: 'fill',
+      source: 'ftw',
+      'source-layer': FTW_FILL_LAYER,
+      paint: {
+        'fill-color': '#f5a623',
+        'fill-opacity': 0.35
+      }
+    });
+
+    mapRight.addLayer({
+      id: 'ftw-outline',
+      type: 'line',
+      source: 'ftw',
+      'source-layer': FTW_BOUNDARY_LAYER,
+      paint: {
+        'line-color': '#c47d00',
+        'line-width': 0.8
+      }
+    });
+  });
+
+  // ── LEFT MAP: solid background, then FTW, then AMS on top ─────────
+  // AMS is opaque where it has tiles, so it fully covers FTW there.
+  // FTW's crop only pads ~0.05deg beyond the demo box though, while
+  // AMS's low-zoom tiles pad much further out (tens of km at z10/z11) -
+  // so there's a ring where BOTH run out. Without a background layer,
+  // that ring would show mapRight bleeding through underneath (terrain
+  // included). The 'bg' layer below is a plain solid fill (no source
+  // needed) sitting at the very bottom, so that ring shows flat color
+  // instead of anything from the right map - no Stadia dependency or
+  // bleed-through on the left, ever, regardless of either layer's extent.
+  // NOTE: ftw source/layers are added via addSource/addLayer after
+  // 'load' (matching the pattern already confirmed working on the
+  // right map), rather than baked into the initial style object.
+  const mapLeft = new maplibregl.Map({
+    container: 'map-left',
+    style: {
+      version: 8,
+      sources: { ams: amsSource },
+      layers: [
+        { id: 'bg', type: 'background', paint: { 'background-color': '#111' } },
+        { id: 'ams', type: 'raster', source: 'ams' }
+      ]
+    },
+    ...sharedOptions
+  });
+
+  mapLeft.on('load', () => {
+    mapLeft.addSource('ftw', { type: 'vector', url: FTW_URL });
+
+    // beforeId: 'ams' inserts these just below the ams layer, so ams
+    // still fully covers them wherever it has tiles.
+    mapLeft.addLayer({
+      id: 'ftw-fill-left',
+      type: 'fill',
+      source: 'ftw',
+      'source-layer': FTW_FILL_LAYER,
+      paint: { 'fill-color': '#f5a623', 'fill-opacity': 0.35 }
+    }, 'ams');
+
+    mapLeft.addLayer({
+      id: 'ftw-outline-left',
+      type: 'line',
+      source: 'ftw',
+      'source-layer': FTW_BOUNDARY_LAYER,
+      paint: { 'line-color': '#c47d00', 'line-width': 0.8 }
+    }, 'ams');
+  });
+
+  // ── SYNC both maps ────────────────────────────────────────────────
+  function syncMaps(source, target) {
+    source.on('move', () => {
+      if (source._syncing) return;
+      target._syncing = true;
+      target.jumpTo({
+        center: source.getCenter(),
+        zoom:   source.getZoom(),
+        bearing: source.getBearing(),
+        pitch:  source.getPitch()
+      });
+      target._syncing = false;
+    });
+  }
+  syncMaps(mapRight, mapLeft);
+  syncMaps(mapLeft,  mapRight);
+
+  // ── DRAG divider ──────────────────────────────────────────────────
+  const divider  = document.getElementById('divider');
+  const mapLeftEl = document.getElementById('map-left');
+  let dragging = false;
+
+  divider.addEventListener('mousedown', () => { dragging = true; });
+  window.addEventListener('mouseup',   () => { dragging = false; });
+  window.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const pct = (e.clientX / window.innerWidth) * 100;
+    const clamped = Math.min(Math.max(pct, 5), 95);
+    divider.style.left = clamped + '%';
+    mapLeftEl.style.clipPath = `inset(0 ${100 - clamped}% 0 0)`;
+  });
+
+  // Touch support
+  divider.addEventListener('touchstart', e => { dragging = true; e.preventDefault(); });
+  window.addEventListener('touchend',   () => { dragging = false; });
+  window.addEventListener('touchmove',  e => {
+    if (!dragging) return;
+    const touch = e.touches[0];
+    const pct = (touch.clientX / window.innerWidth) * 100;
+    const clamped = Math.min(Math.max(pct, 5), 95);
+    divider.style.left = clamped + '%';
+    mapLeftEl.style.clipPath = `inset(0 ${100 - clamped}% 0 0)`;
+  });
+</script>
+</body>
+</html>
